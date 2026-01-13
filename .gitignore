@@ -1,0 +1,48 @@
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Backend
+backend/build/
+backend/out/
+backend/.gradle/
+backend/bin/
+
+# Frontend
+front/node_modules/
+front/.next/
+front/out/
+front/dist/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Backup files
+*_backup/
+*_backup_*/
+front_backup_error/
+
+# Database
+*.db
+*.sqlite
+
+# Sensitive configuration (if needed)
+# application-local.yml
+# application-prod.yml

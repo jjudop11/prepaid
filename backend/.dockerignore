@@ -1,0 +1,28 @@
+# Build artifacts
+build/
+target/
+out/
+dist/
+
+# Gradle
+.gradle/
+gradle/
+gradlew
+gradlew.bat
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Logs
+*.log
+
+# Test reports
+test-results/
+coverage/
+
+# Temporary files
+*.tmp
+*.swp
+README.md
