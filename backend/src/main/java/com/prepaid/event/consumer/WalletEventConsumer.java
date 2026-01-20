@@ -9,7 +9,6 @@ import com.prepaid.notification.service.SseConnectionManager;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.annotation.KafkaListener;
-import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Service;
 
 import java.text.NumberFormat;
@@ -27,31 +26,24 @@ public class WalletEventConsumer {
 
     /**
      * wallet-events 토픽에서 이벤트 소비
+     * - ErrorHandler가 재시도 및 DLQ 전송을 자동 처리
+     * - 예외 발생 시 재시도 (1초 간격 3회)
+     * - 재시도 실패 시 DLQ (wallet-events.DLT)로 전송
      * 
-     * @param event          지갑 이벤트
-     * @param acknowledgment 수동 커밋용
+     * @param event 지갑 이벤트
      */
     @KafkaListener(topics = "wallet-events", groupId = "notification-service", containerFactory = "kafkaListenerContainerFactory")
-    public void consume(WalletEvent event, Acknowledgment acknowledgment) {
-        try {
-            log.info("이벤트 수신: eventId={}, type={}, userId={}",
-                    event.getEventId(), event.getEventType(), event.getUserId());
+    public void consume(WalletEvent event) {
+        log.info("이벤트 수신: eventId={}, type={}, userId={}",
+                event.getEventId(), event.getEventType(), event.getUserId());
 
-            // 이벤트를 알림 DTO로 변환
-            NotificationDto notification = convertToNotification(event);
+        // 이벤트를 알림 DTO로 변환
+        NotificationDto notification = convertToNotification(event);
 
-            // SSE를 통해 사용자에게 전송
-            sseConnectionManager.sendToUser(event.getUserId(), notification);
+        // SSE를 통해 사용자에게 전송
+        sseConnectionManager.sendToUser(event.getUserId(), notification);
 
-            // 수동 커밋
-            acknowledgment.acknowledge();
-
-            log.info("이벤트 처리 완료: eventId={}, type={}", event.getEventId(), event.getEventType());
-        } catch (Exception e) {
-            log.error("이벤트 처리 실패: eventId={}, type={}", event.getEventId(), event.getEventType(), e);
-            // 에러 발생 시에도 커밋 (DLQ 전송은 향후 구현)
-            acknowledgment.acknowledge();
-        }
+        log.info("이벤트 처리 완료: eventId={}, type={}", event.getEventId(), event.getEventType());
     }
 
     /**

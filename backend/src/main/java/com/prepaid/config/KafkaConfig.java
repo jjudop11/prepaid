@@ -1,6 +1,7 @@
 package com.prepaid.config;
 
 import com.prepaid.event.domain.WalletEvent;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -10,16 +11,23 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.*;
+import org.springframework.kafka.listener.CommonErrorHandler;
 import org.springframework.kafka.listener.ContainerProperties;
+import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
+import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.kafka.support.serializer.JsonDeserializer;
 import org.springframework.kafka.support.serializer.JsonSerializer;
+import org.springframework.util.backoff.FixedBackOff;
 
 import java.util.HashMap;
 import java.util.Map;
 
 /**
  * Kafka 프로듀서 및 컨슈머 설정
+ * - 재시도 로직: 1초 간격 3회
+ * - DLQ (Dead Letter Queue) 지원
  */
+@Slf4j
 @Configuration
 public class KafkaConfig {
 
@@ -54,10 +62,29 @@ public class KafkaConfig {
     }
 
     /**
+     * DLQ용 프로듀서 팩토리
+     * - Object 타입으로 다양한 메시지 타입 지원
+     */
+    @Bean
+    public ProducerFactory<String, Object> dlqProducerFactory() {
+        Map<String, Object> configProps = new HashMap<>();
+        configProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        configProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        configProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, JsonSerializer.class);
+
+        return new DefaultKafkaProducerFactory<>(configProps);
+    }
+
+    @Bean
+    public KafkaTemplate<String, Object> dlqKafkaTemplate() {
+        return new KafkaTemplate<>(dlqProducerFactory());
+    }
+
+    /**
      * Kafka 컨슈머 설정
      * - JSON 역직렬화
      * - 컨슈머 그룹: notification-service
-     * - 수동 커밋
+     * - 자동 커밋 (ErrorHandler가 처리)
      */
     @Bean
     public ConsumerFactory<String, WalletEvent> consumerFactory() {
@@ -74,18 +101,55 @@ public class KafkaConfig {
 
         // 컨슈머 오프셋 관리
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);
 
         return new DefaultKafkaConsumerFactory<>(props);
     }
 
+    /**
+     * 에러 핸들러 설정
+     * - 재시도: 1초 간격으로 3회
+     * - 재시도 실패 시: DLQ (wallet-events.DLT) 토픽으로 전송
+     */
     @Bean
-    public ConcurrentKafkaListenerContainerFactory<String, WalletEvent> kafkaListenerContainerFactory() {
+    public CommonErrorHandler errorHandler(KafkaTemplate<String, Object> dlqKafkaTemplate) {
+        // DLQ recoverer: 실패한 메시지를 DLT 토픽으로 전송
+        DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(dlqKafkaTemplate,
+                (record, exception) -> {
+                    // DLQ 토픽 이름: 원본토픽.DLT
+                    String dlqTopic = record.topic() + ".DLT";
+                    log.error("메시지 DLQ 전송: topic={}, dlqTopic={}, key={}, exception={}",
+                            record.topic(), dlqTopic, record.key(), exception.getMessage());
+                    return new org.apache.kafka.common.TopicPartition(dlqTopic, record.partition());
+                });
+
+        // 재시도 정책: 1초 간격, 3회 재시도
+        DefaultErrorHandler errorHandler = new DefaultErrorHandler(
+                recoverer,
+                new FixedBackOff(1000L, 3L) // 1초 간격, 3회 재시도
+        );
+
+        // 재시도 로깅
+        errorHandler.setRetryListeners((record, ex, deliveryAttempt) ->
+                log.warn("메시지 재시도 중: topic={}, partition={}, offset={}, attempt={}/{}, exception={}",
+                        record.topic(), record.partition(), record.offset(),
+                        deliveryAttempt, 3, ex.getMessage())
+        );
+
+        return errorHandler;
+    }
+
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, WalletEvent> kafkaListenerContainerFactory(
+            CommonErrorHandler errorHandler) {
         ConcurrentKafkaListenerContainerFactory<String, WalletEvent> factory = new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(consumerFactory());
 
-        // 수동 커밋 모드
-        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL);
+        // ErrorHandler 설정 (재시도 + DLQ)
+        factory.setCommonErrorHandler(errorHandler);
+
+        // 자동 커밋 모드 (ErrorHandler가 관리)
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.BATCH);
 
         return factory;
     }
