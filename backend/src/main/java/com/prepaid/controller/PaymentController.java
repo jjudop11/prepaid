@@ -1,6 +1,10 @@
 package com.prepaid.controller;
 
+import com.prepaid.audit.event.AuditEvent;
+import com.prepaid.audit.service.AuditEventPublisher;
 import com.prepaid.auth.jwt.JwtProvider;
+import com.prepaid.common.exception.specific.UserNotFoundException;
+import com.prepaid.common.idempotency.IdempotencyService;
 import com.prepaid.domain.User;
 import com.prepaid.payment.dto.PaymentConfirmRequest;
 import com.prepaid.payment.service.PaymentService;
@@ -12,7 +16,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import com.prepaid.auth.util.CookieUtils;
-import com.prepaid.payment.dto.PaymentUseRequest; // Added import for PaymentUseRequest
+import com.prepaid.payment.dto.PaymentUseRequest;
 
 @RestController
 @RequestMapping("/api/payments")
@@ -22,39 +26,136 @@ public class PaymentController {
         private final PaymentService paymentService;
         private final com.prepaid.ledger.service.LedgerService ledgerService;
         private final UserRepository userRepository;
-        private final JwtProvider jwtProvider; // Quick user fetch for MVP
+        private final JwtProvider jwtProvider;
+        private final IdempotencyService idempotencyService;
+        private final AuditEventPublisher auditEventPublisher;
 
-        // 사용자 조회 (Simplified: 실제 앱에서는 ArgumentResolver 사용)
+        /**
+         * 충전 확인
+         * Idempotency-Key 헤더로 중복 요청 방지
+         */
         @PostMapping("/confirm")
-        public ResponseEntity<Void> confirmPayment(@RequestBody PaymentConfirmRequest request,
+        public ResponseEntity<Void> confirmPayment(
+                        @RequestHeader(value = "Idempotency-Key", required = true) String idempotencyKey,
+                        @RequestBody PaymentConfirmRequest request,
                         HttpServletRequest httpRequest) {
-                String accessToken = CookieUtils.getCookie(httpRequest, "accessToken")
-                                .map(Cookie::getValue).orElseThrow(() -> new RuntimeException("토큰이 없습니다."));
+                
+                // 1. 멱등성 체크
+                idempotencyService.startProcessing(idempotencyKey);
+                
+                User targetUser = null;
+                String ipAddress = getClientIp(httpRequest);
+                String userAgent = httpRequest.getHeader("User-Agent");
+                
+                try {
+                        // 2. 사용자 조회
+                        String accessToken = CookieUtils.getCookie(httpRequest, "accessToken")
+                                        .map(Cookie::getValue)
+                                        .orElseThrow(() -> new RuntimeException("토큰이 없습니다."));
 
-                Authentication auth = jwtProvider.getAuthentication(accessToken);
-                // CustomOAuth2UserService에서는 주로 이메일을 Principal Name으로 저장함.
-                // 이메일이 고유하다고 가정하고 사용자 조회.
-                User targetUser = userRepository.findByEmail(auth.getName())
-                                .orElseThrow(() -> new RuntimeException("사용자를 찾을 수 없습니다."));
+                        Authentication auth = jwtProvider.getAuthentication(accessToken);
+                        targetUser = userRepository.findByEmail(auth.getName())
+                                        .orElseThrow(() -> new UserNotFoundException());
 
-                paymentService.confirmPayment(targetUser, request);
-                return ResponseEntity.ok().build();
+                        // 3. 결제 확인 처리
+                        paymentService.confirmPayment(targetUser, request);
+                        
+                        // 4. 성공 처리
+                        idempotencyService.markCompleted(idempotencyKey, "SUCCESS");
+                        
+                        // 5. 감사 로그 발행
+                        auditEventPublisher.publish(AuditEvent.success(
+                                targetUser.getId(), "CHARGE", request.getAmount(),
+                                request.getOrderId(), ipAddress, userAgent
+                        ));
+                        
+                        return ResponseEntity.ok().build();
+                } catch (Exception e) {
+                        // 6. 실패 처리
+                        idempotencyService.markFailed(idempotencyKey, e.getMessage());
+                        
+                        // 7. 감사 로그 발행 (실패)
+                        if (targetUser != null) {
+                                auditEventPublisher.publish(AuditEvent.failed(
+                                        targetUser.getId(), "CHARGE", request.getAmount(),
+                                        e.getMessage(), ipAddress, userAgent
+                                ));
+                        }
+                        
+                        throw e;
+                }
         }
 
+        /**
+         * 잔액 사용
+         * Idempotency-Key 헤더로 중복 요청 방지
+         */
         @PostMapping("/use")
-        public ResponseEntity<Void> useBalance(@RequestBody PaymentUseRequest request, HttpServletRequest httpRequest) {
-                String accessToken = CookieUtils.getCookie(httpRequest, "accessToken")
-                                .map(Cookie::getValue).orElseThrow(() -> new RuntimeException("토큰이 없습니다."));
+        public ResponseEntity<Void> useBalance(
+                        @RequestHeader(value = "Idempotency-Key", required = true) String idempotencyKey,
+                        @RequestBody PaymentUseRequest request,
+                        HttpServletRequest httpRequest) {
+                
+                // 1. 멱등성 체크
+                idempotencyService.startProcessing(idempotencyKey);
+                
+                User targetUser = null;
+                String ipAddress = getClientIp(httpRequest);
+                String userAgent = httpRequest.getHeader("User-Agent");
+                
+                try {
+                        // 2. 사용자 조회
+                        String accessToken = CookieUtils.getCookie(httpRequest, "accessToken")
+                                        .map(Cookie::getValue)
+                                        .orElseThrow(() -> new RuntimeException("토큰이 없습니다."));
 
-                Authentication auth = jwtProvider.getAuthentication(accessToken);
-                User targetUser = userRepository.findByEmail(auth.getName())
-                                .orElseThrow(() -> new RuntimeException("사용자를 찾을 수 없습니다."));
+                        Authentication auth = jwtProvider.getAuthentication(accessToken);
+                        targetUser = userRepository.findByEmail(auth.getName())
+                                        .orElseThrow(() -> new UserNotFoundException());
 
-                // LedgerService 직접 호출 vs PaymentService 경유
-                // "결제 사용"은 Toss 연동(PaymentService)과는 별개의 내부 로직이므로 LedgerService 사용.
-                // 장기적으로는 PaymentService가 Facade 역할을 할 수도 있겠지만, 현재는 "포인트 사용"의 명확성을 위해 직접 주입함.
-                ledgerService.useBalance(targetUser, request.getAmount(), request.getMerchantUid());
+                        // 3. 잔액 사용 처리
+                        ledgerService.useBalance(targetUser, request.getAmount(), request.getMerchantUid());
+                        
+                        // 4. 성공 처리
+                        idempotencyService.markCompleted(idempotencyKey, "SUCCESS");
+                        
+                        // 5. 감사 로그 발행
+                        auditEventPublisher.publish(AuditEvent.success(
+                                targetUser.getId(), "USE", request.getAmount(),
+                                request.getMerchantUid(), ipAddress, userAgent
+                        ));
+                        
+                        return ResponseEntity.ok().build();
+                } catch (Exception e) {
+                        // 6. 실패 처리
+                        idempotencyService.markFailed(idempotencyKey, e.getMessage());
+                        
+                        // 7. 감사 로그 발행 (실패)
+                        if (targetUser != null) {
+                                auditEventPublisher.publish(AuditEvent.failed(
+                                        targetUser.getId(), "USE", request.getAmount(),
+                                        e.getMessage(), ipAddress, userAgent
+                                ));
+                        }
+                        
+                        throw e;
+                }
+        }
 
-                return ResponseEntity.ok().build();
+        /**
+         * 클라이언트 IP 주소 추출
+         */
+        private String getClientIp(HttpServletRequest request) {
+                String ip = request.getHeader("X-Forwarded-For");
+                if (ip == null || ip.isEmpty() || "unknown".equalsIgnoreCase(ip)) {
+                        ip = request.getHeader("Proxy-Client-IP");
+                }
+                if (ip == null || ip.isEmpty() || "unknown".equalsIgnoreCase(ip)) {
+                        ip = request.getHeader("WL-Proxy-Client-IP");
+                }
+                if (ip == null || ip.isEmpty() || "unknown".equalsIgnoreCase(ip)) {
+                        ip = request.getRemoteAddr();
+                }
+                return ip;
         }
 }

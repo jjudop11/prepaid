@@ -73,3 +73,12 @@ logging:
     org.springframework.web: INFO
     org.hibernate.SQL: INFO
     org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+
+payment:
+  charge:
+    min-amount: 1000        # 최소 충전 금액 1,000원
+    max-amount: 1000000     # 최대 충전 금액 1,000,000원
+    daily-limit: 5000000    # 일일 충전 한도 5,000,000원
+  use:
+    min-amount: 100         # 최소 사용 금액 100원
+    max-amount: 1000000     # 최대 사용 금액 1,000,000원

@@ -1,5 +1,8 @@
 package com.prepaid.ledger.service;
 
+import com.prepaid.common.exception.ErrorCode;
+import com.prepaid.common.exception.specific.InsufficientBalanceException;
+import com.prepaid.common.exception.specific.WalletNotFoundException;
 import com.prepaid.common.lock.DistributedLock;
 import com.prepaid.domain.User;
 import com.prepaid.domain.Wallet;
@@ -8,6 +11,7 @@ import com.prepaid.event.domain.SpendCompletedEvent;
 import com.prepaid.event.service.EventPublisher;
 import com.prepaid.ledger.domain.*;
 import com.prepaid.ledger.repository.*;
+import com.prepaid.payment.validation.PaymentValidator;
 import com.prepaid.repository.WalletRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -28,6 +32,7 @@ public class LedgerService {
         private final ChargeLotRepository chargeLotRepository;
         private final SpendAllocationRepository spendAllocationRepository;
         private final EventPublisher eventPublisher;
+        private final PaymentValidator paymentValidator;
 
         @Transactional
         public void recordCharge(User user, Long amount, String paymentKey, String orderId) {
@@ -87,12 +92,15 @@ public class LedgerService {
 
         @DistributedLock(key = "'wallet:' + #user.id")
         public void useBalance(User user, Long amount, String merchantUid) {
-                // 1. 지갑 잔액 확인
+                // 1. 금액 검증
+                paymentValidator.validateUseAmount(amount);
+                
+                // 2. 지갑 잔액 확인
                 Wallet wallet = walletRepository.findByUserId(user.getId())
-                                .orElseThrow(() -> new RuntimeException("지갑을 찾을 수 없습니다."));
+                        .orElseThrow(() -> new WalletNotFoundException());
 
-                if (wallet.getBalance() < amount) {
-                        throw new RuntimeException("잔액이 부족합니다.");
+        if (wallet.getBalance() < amount) {
+                throw new InsufficientBalanceException("현재 잔액: " + wallet.getBalance() + "원, 요청 금액: " + amount + "원");
                 }
 
                 // 2. 사용(USE)을 위한 원장 엔트리 생성
@@ -119,9 +127,9 @@ public class LedgerService {
                 }
 
                 if (remainingToUse > 0) {
-                        // 잔액 확인을 통과했으므로 발생하면 안 되는 상황.
-                        // 동시성 문제가 없다면(DistributedLock 사용 중) 안전함.
-                        throw new RuntimeException("예기치 않은 오류: 차감 중 잔액 불일치 발생");
+                // 잔액 확인을 통과했으므로 발생하면 안 되는 상황.
+                // 동시성 문제가 없다면(DistributedLock 사용 중) 안전함.
+                throw new InsufficientBalanceException("예기치 않은 오류: 차감 중 잔액 불일치 발생 (남은 금액: " + remainingToUse + "원)");
                 }
 
                 // 4. 원장 라인 생성
