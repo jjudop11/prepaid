@@ -14,6 +14,7 @@ import com.prepaid.ledger.repository.*;
 import com.prepaid.payment.validation.PaymentValidator;
 import com.prepaid.repository.WalletRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.event.TransactionalEventListener;
@@ -22,6 +23,7 @@ import org.springframework.transaction.event.TransactionPhase;
 import java.util.List;
 import java.util.UUID;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class LedgerService {
@@ -217,5 +219,69 @@ public class LedgerService {
         public void publishSpendCompletedEvent(Long userId, Long amount, Long newBalance, String referenceId) {
                 SpendCompletedEvent event = new SpendCompletedEvent(userId, amount, newBalance, referenceId, "잔액 사용");
                 eventPublisher.publish(event);
+        }
+
+        /**
+         * 환불 기록
+         */
+        @Transactional
+        public void recordRefund(User user, Long amount, String orderId, String reason) {
+                // 1. 지갑 조회
+                Wallet wallet = walletRepository.findByUserId(user.getId())
+                                .orElseThrow(() -> new WalletNotFoundException());
+
+                // 2. 잔액이 충분한지 확인 (환불할 금액만큼 있어야 함)
+                if (wallet.getBalance() < amount) {
+                        throw new InsufficientBalanceException("환불 금액보다 잔액이 부족합니다.");
+                }
+
+                // 3. 원장 엔트리 생성 (REFUND 타입)
+                String idempotencyKey = java.util.UUID.randomUUID().toString();
+                LedgerEntry refundEntry = LedgerEntry.builder()
+                                .wallet(wallet)
+                                .txType(TxType.REFUND)
+                                .status(LedgerStatus.POSTED)
+                                .referenceId(orderId)
+                                .idempotencyKey(idempotencyKey)
+                                .memo("Refund: " + reason)
+                                .build();
+                ledgerEntryRepository.save(refundEntry);
+
+                // 4. 원장 라인 생성 (복식부기)
+                // 차변: 외부 출금 (환불)
+                LedgerLine debit = LedgerLine.builder()
+                                .entry(refundEntry)
+                                .accountCode(AccountCode.EXTERNAL_CASH_IN)
+                                .amountSigned(amount)
+                                .build();
+
+                // 대변: 지갑 현금 감소
+                LedgerLine credit = LedgerLine.builder()
+                                .entry(refundEntry)
+                                .accountCode(AccountCode.WALLET_CASH)
+                                .amountSigned(-amount)
+                                .build();
+
+                ledgerLineRepository.save(debit);
+                ledgerLineRepository.save(credit);
+
+                // 5. ChargeLot에서 차감 (FIFO, PAID 버킷만)
+                Long remainingToDeduct = amount;
+                List<ChargeLot> lots = chargeLotRepository
+                                .findAllByWalletIdAndBucketTypeAndAmountRemainingGreaterThanOrderByCreatedAtAsc(
+                                                wallet.getId(), BucketType.PAID, 0L);
+
+                for (ChargeLot lot : lots) {
+                        if (remainingToDeduct <= 0) break;
+
+                        Long deductFromLot = Math.min(lot.getAmountRemaining(), remainingToDeduct);
+                        lot.decreaseRemaining(deductFromLot);
+                        remainingToDeduct -= deductFromLot;
+                }
+
+                // 6. 지갑 잔액 차감
+                wallet.addBalance(-amount, BucketType.PAID);
+
+                log.info("환불 기록 완료: userId={}, amount={}, orderId={}", user.getId(), amount, orderId);
         }
 }

@@ -44,4 +44,11 @@ public class ChargeLot {
         }
         this.amountRemaining -= amount;
     }
+
+    /**
+     * 포인트 만료 처리
+     */
+    public void expire() {
+        this.amountRemaining = 0L;
+    }
 }

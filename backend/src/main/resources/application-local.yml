@@ -82,6 +82,8 @@ payment:
   use:
     min-amount: 100         # 최소 사용 금액 100원
     max-amount: 1000000     # 최대 사용 금액 1,000,000원
+  refund:
+    period-days: 7          # 환불 가능 기간 (일)
 
 # Actuator 및 모니터링 설정
 management:
