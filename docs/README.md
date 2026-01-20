@@ -114,12 +114,43 @@ docs/
 
 ---
 
-## 📅 문서 이력
+## 📖 문서 히스토리
 
 | 날짜 | 문서 | 설명 |
 |------|------|------|
-| 2026-01-20 | architecture/kafka-architecture.md | Kafka 이벤트 시스템 아키텍처 정리 |
-| 2026-01-20 | backend/kafka-retry-dlq.md | Kafka 재시도 + DLQ 구현 |
+| 2026-01-20 | **complete-implementation.md** | ⭐ Phase 1-4 전체 완료 문서 |
+| 2026-01-20 | improvement-plan.md | Phase 1-4 구현 계획서 |
+| 2026-01-20 | phase1-3-complete.md | Phase 1-3 중간 문서 |
+| 2026-01-20 | phase1-2-improvements.md | Phase 1-2 초기 문서 |
+| 2026-01-20 | kafka-retry-dlq.md | Kafka 재시도/DLQ 구현 |
+| 2026-01-13 | kafka-architecture.md | Kafka + SSE 아키텍처 |
+
+---
+
+## 🔍 빠른 찾기
+
+### 세션이 날아갔을 때
+1. **프로젝트 루트의 `STATUS.md`** 먼저 확인
+2. `backend/complete-implementation.md` 전체 구현 내역 확인
+3. 이 README.md로 문서 구조 파악
+
+### 특정 기능 찾기
+- **예외 처리**: complete-implementation.md > Phase 1
+- **금액 검증**: complete-implementation.md > Phase 1
+- **환불**: complete-implementation.md > Phase 2
+- **스케줄러**: complete-implementation.md > Phase 4
+- **Kafka**: architecture/kafka-architecture.md
+
+---
+
+## 📝 최근 업데이트
+
+**2026-01-20**: Phase 1-4 전체 완료
+- 환불 기능 추가
+- 포인트 만료 스케줄러
+- @CurrentUser ArgumentResolver
+- 단위 테스트 추가
+- 전체 구현 문서 작성
 
 ---
 
