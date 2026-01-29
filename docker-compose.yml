@@ -3,9 +3,9 @@ services:
     image: postgres:16-alpine
     container_name: prepaid-postgres
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: prepaid_db
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-prepaid_db}
       TZ: Asia/Seoul
     ports:
       - "5433:5432"

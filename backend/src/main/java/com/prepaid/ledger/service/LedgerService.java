@@ -17,11 +17,11 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.event.TransactionalEventListener;
-import org.springframework.transaction.event.TransactionPhase;
 
 import java.util.List;
 import java.util.UUID;
+
+import static com.prepaid.common.logging.LoggingUtils.*;
 
 @Slf4j
 @Service
@@ -38,58 +38,69 @@ public class LedgerService {
 
         @Transactional
         public void recordCharge(User user, Long amount, String paymentKey, String orderId) {
-                // 1. 지갑 조회 또는 생성
-                Wallet wallet = walletRepository.findByUserId(user.getId())
-                                .orElseGet(() -> {
-                                        Wallet newWallet = Wallet.builder().user(user).build();
-                                        return walletRepository.save(newWallet);
-                                });
+                // MDC에 컨텍스트 정보 추가 (구조화된 로깅)
+                setLedgerContext(user.getId(), "CHARGE", amount, orderId);
+                setPaymentContext(paymentKey);
+                
+                try {
+                        // 1. 지갑 조회 또는 생성
+                        Wallet wallet = walletRepository.findByUserId(user.getId())
+                                        .orElseGet(() -> {
+                                                Wallet newWallet = Wallet.builder().user(user).build();
+                                                return walletRepository.save(newWallet);
+                                        });
 
-                // 2. 원장 엔트리 생성 (헤더)
-                LedgerEntry entry = LedgerEntry.builder()
-                                .wallet(wallet)
-                                .txType(TxType.CHARGE)
-                                .status(LedgerStatus.POSTED)
-                                .referenceId(orderId)
-                                .idempotencyKey(paymentKey)
-                                .bucketType(BucketType.PAID)
-                                .memo("Charge via Toss")
-                                .build();
-                ledgerEntryRepository.save(entry);
+                        // 2. 원장 엔트리 생성 (헤더)
+                        LedgerEntry entry = LedgerEntry.builder()
+                                        .wallet(wallet)
+                                        .txType(TxType.CHARGE)
+                                        .status(LedgerStatus.POSTED)
+                                        .referenceId(orderId)
+                                        .idempotencyKey(paymentKey)
+                                        .bucketType(BucketType.PAID)
+                                        .memo("Charge via Toss")
+                                        .build();
+                        ledgerEntryRepository.save(entry);
 
-                // 3. 원장 라인 생성 (복식부기)
-                // 차변(Debit): 지갑 현금 자산 증가 (+amount)
-                LedgerLine debit = LedgerLine.builder()
-                                .entry(entry)
-                                .accountCode(AccountCode.WALLET_CASH)
-                                .amountSigned(amount)
-                                .build();
+                        // 3. 원장 라인 생성 (복식부기)
+                        // 차변(Debit): 지갑 현금 자산 증가 (+amount)
+                        LedgerLine debit = LedgerLine.builder()
+                                        .entry(entry)
+                                        .accountCode(AccountCode.WALLET_CASH)
+                                        .amountSigned(amount)
+                                        .build();
 
-                // 대변(Credit): 외부 입금 (부채/출처) (-amount)
-                LedgerLine credit = LedgerLine.builder()
-                                .entry(entry)
-                                .accountCode(AccountCode.EXTERNAL_CASH_IN)
-                                .amountSigned(-amount)
-                                .build();
+                        // 대변(Credit): 외부 입금 (부채/출처) (-amount)
+                        LedgerLine credit = LedgerLine.builder()
+                                        .entry(entry)
+                                        .accountCode(AccountCode.EXTERNAL_CASH_IN)
+                                        .amountSigned(-amount)
+                                        .build();
 
-                ledgerLineRepository.save(debit);
-                ledgerLineRepository.save(credit);
+                        ledgerLineRepository.save(debit);
+                        ledgerLineRepository.save(credit);
 
-                // 4. Charge Lot 생성 (유료 잔액에 대한 FIFO 추적)
-                ChargeLot chargeLot = ChargeLot.builder()
-                                .wallet(wallet)
-                                .bucketType(BucketType.PAID)
-                                .originalEntryId(entry.getId())
-                                .amountTotal(amount)
-                                .amountRemaining(amount)
-                                .build();
-                chargeLotRepository.save(chargeLot);
+                        // 4. Charge Lot 생성 (유료 잔액에 대한 FIFO 추적)
+                        ChargeLot chargeLot = ChargeLot.builder()
+                                        .wallet(wallet)
+                                        .bucketType(BucketType.PAID)
+                                        .originalEntryId(entry.getId())
+                                        .amountTotal(amount)
+                                        .amountRemaining(amount)
+                                        .build();
+                        chargeLotRepository.save(chargeLot);
 
-                // 5. 파생된 잔액(Derived Balance) 업데이트
-                wallet.addBalance(amount, BucketType.PAID);
+                        // 5. 파생된 잔액(Derived Balance) 업데이트
+                        wallet.addBalance(amount, BucketType.PAID);
 
-                // 6. 충전 완료 이벤트 발행 (트랜잭션 커밋 후)
-                publishChargeCompletedEvent(user.getId(), amount, wallet.getBalance(), paymentKey, orderId);
+                        // 6. 충전 완료 이벤트 발행 (트랜잭션 커밋 후)
+                        publishChargeCompletedEvent(user.getId(), amount, wallet.getBalance(), paymentKey, orderId);
+                        
+                        log.info("충전 완료");
+                } finally {
+                        // MDC 정리
+                        clearContext();
+                }
         }
 
         @DistributedLock(key = "'wallet:' + #user.id")
@@ -203,9 +214,188 @@ public class LedgerService {
         }
 
         /**
+         * 충전 취소 (특정 ChargeLot 무효화)
+         * @param chargeEntryId 취소할 충전 거래의 LedgerEntry ID
+         * @param user 사용자
+         * @param reason 취소 사유
+         * @return 취소된 금액
+         */
+        @Transactional
+        public Long cancelCharge(Long chargeEntryId, User user, String reason) {
+                setUserContext(user.getId());
+                setTransactionContext("CHARGE_CANCEL", null);
+                
+                try {
+                // 1. 원본 충전 거래 조회
+                LedgerEntry chargeEntry = ledgerEntryRepository.findById(chargeEntryId)
+                        .orElseThrow(() -> new IllegalArgumentException("충전 거래를 찾을 수 없습니다"));
+                
+                // 2. 권한 검증 (본인 거래인지)
+                if (!chargeEntry.getWallet().getUser().getId().equals(user.getId())) {
+                        throw new com.prepaid.common.exception.specific.UnauthorizedException("본인의 거래만 취소할 수 있습니다");
+                }
+                
+                // 3. 충전 거래인지 확인
+                if (chargeEntry.getTxType() != TxType.CHARGE) {
+                        throw new IllegalStateException("충전 거래가 아닙니다");
+                }
+                
+                // 4. 해당 ChargeLot 조회
+                ChargeLot lot = chargeLotRepository.findByOriginalEntryId(chargeEntryId)
+                        .orElseThrow(() -> new IllegalStateException("ChargeLot을 찾을 수 없습니다"));
+                
+                // 5. 취소 가능 여부 확인
+                if (lot.getAmountRemaining() == 0) {
+                        throw new IllegalStateException("이미 모두 사용된 충전 건입니다. 취소 불가능합니다.");
+                }
+                
+                Long cancelableAmount = lot.getAmountRemaining();
+                Long usedAmount = lot.getAmountTotal() - lot.getAmountRemaining();
+                
+                // 6. 부분 사용된 경우 경고 로그
+                if (usedAmount > 0) {
+                        log.warn("부분 사용된 충전 건 취소: userId={}, chargeId={}, total={}, used={}, canceling={}", 
+                                user.getId(), chargeEntryId, lot.getAmountTotal(), usedAmount, cancelableAmount);
+                }
+                
+                // 7. CHARGE_CANCEL 원장 엔트리 생성
+                LedgerEntry cancelEntry = LedgerEntry.builder()
+                        .wallet(chargeEntry.getWallet())
+                        .txType(TxType.CHARGE_CANCEL)
+                        .status(LedgerStatus.POSTED)
+                        .referenceId(chargeEntry.getReferenceId())
+                        .idempotencyKey(UUID.randomUUID().toString())
+                        .memo("Charge Cancel: " + reason)
+                        .build();
+                ledgerEntryRepository.save(cancelEntry);
+                
+                // 8. 원장 라인 생성 (복식부기 - CHARGE의 역방향)
+                LedgerLine debit = LedgerLine.builder()
+                        .entry(cancelEntry)
+                        .accountCode(AccountCode.EXTERNAL_CASH_IN)
+                        .amountSigned(cancelableAmount)  // 외부로 돌려줌
+                        .build();
+                
+                LedgerLine credit = LedgerLine.builder()
+                        .entry(cancelEntry)
+                        .accountCode(AccountCode.WALLET_CASH)
+                        .amountSigned(-cancelableAmount)  // 지갑에서 차감
+                        .build();
+                
+                ledgerLineRepository.save(debit);
+                ledgerLineRepository.save(credit);
+                
+                // 9. ChargeLot 무효화 (remaining = 0으로 만듦)
+                lot.decreaseRemaining(cancelableAmount);
+                
+                // 10. Wallet 잔액 차감
+                Wallet wallet = chargeEntry.getWallet();
+                wallet.addBalance(-cancelableAmount, BucketType.PAID);
+                
+                log.info("충전 취소 완료: chargeId={}, canceledAmount={}", chargeEntryId, cancelableAmount);
+                
+                return cancelableAmount;
+                } finally {
+                        clearContext();
+                }
+        }
+
+        /**
+         * 결제 취소 (사용 거래 원복)
+         * @param useEntryId 취소할 사용 거래의 LedgerEntry ID
+         * @param user 사용자
+         * @param reason 취소 사유
+         * @return 복구된 금액
+         */
+        @Transactional
+        public Long reverseUse(Long useEntryId, User user, String reason) {
+                // 1. 원본 사용 거래 조회
+                LedgerEntry useEntry = ledgerEntryRepository.findById(useEntryId)
+                        .orElseThrow(() -> new IllegalArgumentException("사용 거래를 찾을 수 없습니다"));
+                
+                // 2. 권한 검증
+                if (!useEntry.getWallet().getUser().getId().equals(user.getId())) {
+                        throw new com.prepaid.common.exception.specific.UnauthorizedException("본인의 거래만 취소할 수 있습니다");
+                }
+                
+                // 3. 사용 거래인지 확인
+                if (useEntry.getTxType() != TxType.USE) {
+                        throw new IllegalStateException("사용 거래가 아닙니다");
+                }
+                
+                // 4. 이미 취소된 거래인지 확인
+                boolean alreadyReversed = ledgerEntryRepository.existsByTxTypeAndReferenceId(
+                        TxType.REVERSAL, useEntry.getReferenceId());
+                if (alreadyReversed) {
+                        throw new IllegalStateException("이미 취소된 거래입니다");
+                }
+                
+                // 5. SpendAllocation 조회 (어떤 ChargeLot에서 얼마나 사용했는지)
+                List<SpendAllocation> allocations = spendAllocationRepository
+                        .findAllBySpendEntryId(useEntryId);
+                
+                if (allocations.isEmpty()) {
+                        throw new IllegalStateException("SpendAllocation을 찾을 수 없습니다");
+                }
+                
+                // 6. REVERSAL 원장 엔트리 생성
+                LedgerEntry reversalEntry = LedgerEntry.builder()
+                        .wallet(useEntry.getWallet())
+                        .txType(TxType.REVERSAL)
+                        .status(LedgerStatus.POSTED)
+                        .referenceId(useEntry.getReferenceId())
+                        .idempotencyKey(UUID.randomUUID().toString())
+                        .memo("Use Reversal: " + reason)
+                        .build();
+                ledgerEntryRepository.save(reversalEntry);
+                
+                // 7. 각 ChargeLot에 금액 복구
+                Long totalReversed = 0L;
+                for (SpendAllocation allocation : allocations) {
+                        ChargeLot lot = allocation.getChargeLot();
+                        Long amountToRestore = allocation.getAmountConsumed();
+                        
+                        // ChargeLot 잔액 복구
+                        lot.increaseRemaining(amountToRestore);
+                        
+                        totalReversed += amountToRestore;
+                        
+                        log.debug("ChargeLot 복구: lotId={}, restored={}", lot.getId(), amountToRestore);
+                }
+                
+                // 8. 원장 라인 생성 (복식부기 - USE의 역방향)
+                LedgerLine debit = LedgerLine.builder()
+                        .entry(reversalEntry)
+                        .accountCode(AccountCode.WALLET_CASH)
+                        .amountSigned(totalReversed)  // 지갑에 복구
+                        .build();
+                
+                LedgerLine credit = LedgerLine.builder()
+                        .entry(reversalEntry)
+                        .accountCode(AccountCode.EXTERNAL_CASH_IN)
+                        .amountSigned(-totalReversed)  // 외부에서 회수
+                        .build();
+                
+                ledgerLineRepository.save(debit);
+                ledgerLineRepository.save(credit);
+                
+                // 9. Wallet 잔액 복구
+                Wallet wallet = useEntry.getWallet();
+                // allocations에서 버킷 타입 복구 (PAID/FREE 구분)
+                for (SpendAllocation allocation : allocations) {
+                        BucketType bucketType = allocation.getChargeLot().getBucketType();
+                        wallet.addBalance(allocation.getAmountConsumed(), bucketType);
+                }
+                
+                log.info("사용 취소 완료: userId={}, useId={}, reversedAmount={}", 
+                        user.getId(), useEntryId, totalReversed);
+                
+                return totalReversed;
+        }
+
+        /**
          * 충전 완료 이벤트 발행 (트랜잭션 커밋 후 실행)
          */
-        @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
         public void publishChargeCompletedEvent(Long userId, Long amount, Long newBalance, String paymentKey,
                         String orderId) {
                 ChargeCompletedEvent event = new ChargeCompletedEvent(userId, amount, newBalance, paymentKey, orderId);
@@ -215,49 +405,56 @@ public class LedgerService {
         /**
          * 사용 완료 이벤트 발행 (트랜잭션 커밋 후 실행)
          */
-        @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
         public void publishSpendCompletedEvent(Long userId, Long amount, Long newBalance, String referenceId) {
                 SpendCompletedEvent event = new SpendCompletedEvent(userId, amount, newBalance, referenceId, "잔액 사용");
                 eventPublisher.publish(event);
         }
 
         /**
-         * 환불 기록
+         * 환불/인출 (순수한 잔액 인출)
+         * - 은행 계좌로 출금하는 경우
+         * - FIFO로 ChargeLot 차감
+         * - 충전 취소가 아닌 순수한 인출 용도
+         * 
+         * @param user 사용자
+         * @param amount 인출 금액
+         * @param reason 인출 사유
          */
         @Transactional
-        public void recordRefund(User user, Long amount, String orderId, String reason) {
+        public void recordWithdrawal(User user, Long amount, String reason) {
                 // 1. 지갑 조회
                 Wallet wallet = walletRepository.findByUserId(user.getId())
                                 .orElseThrow(() -> new WalletNotFoundException());
 
-                // 2. 잔액이 충분한지 확인 (환불할 금액만큼 있어야 함)
+                // 2. 잔액이 충분한지 확인 (인출할 금액만큼 있어야 함)
                 if (wallet.getBalance() < amount) {
-                        throw new InsufficientBalanceException("환불 금액보다 잔액이 부족합니다.");
+                        throw new InsufficientBalanceException("인출 금액보다 잔액이 부족합니다. 현재 잔액: " + wallet.getBalance() + "원");
                 }
 
-                // 3. 원장 엔트리 생성 (REFUND 타입)
+                // 3. 원장 엔트리 생성 (REFUND 타입 - 인출 용도)
+                String referenceId = "WITHDRAWAL_" + System.currentTimeMillis();
                 String idempotencyKey = java.util.UUID.randomUUID().toString();
-                LedgerEntry refundEntry = LedgerEntry.builder()
+                LedgerEntry withdrawalEntry = LedgerEntry.builder()
                                 .wallet(wallet)
                                 .txType(TxType.REFUND)
                                 .status(LedgerStatus.POSTED)
-                                .referenceId(orderId)
+                                .referenceId(referenceId)
                                 .idempotencyKey(idempotencyKey)
-                                .memo("Refund: " + reason)
+                                .memo("Withdrawal: " + reason)
                                 .build();
-                ledgerEntryRepository.save(refundEntry);
+                ledgerEntryRepository.save(withdrawalEntry);
 
                 // 4. 원장 라인 생성 (복식부기)
-                // 차변: 외부 출금 (환불)
+                // 차변: 외부 출금
                 LedgerLine debit = LedgerLine.builder()
-                                .entry(refundEntry)
+                                .entry(withdrawalEntry)
                                 .accountCode(AccountCode.EXTERNAL_CASH_IN)
                                 .amountSigned(amount)
                                 .build();
 
                 // 대변: 지갑 현금 감소
                 LedgerLine credit = LedgerLine.builder()
-                                .entry(refundEntry)
+                                .entry(withdrawalEntry)
                                 .accountCode(AccountCode.WALLET_CASH)
                                 .amountSigned(-amount)
                                 .build();
@@ -282,6 +479,17 @@ public class LedgerService {
                 // 6. 지갑 잔액 차감
                 wallet.addBalance(-amount, BucketType.PAID);
 
-                log.info("환불 기록 완료: userId={}, amount={}, orderId={}", user.getId(), amount, orderId);
+                log.info("잔액 인출 완료: userId={}, amount={}, reason={}", user.getId(), amount, reason);
+        }
+        
+        /**
+         * 환불 기록 (하위 호환성 유지)
+         * @deprecated Use recordWithdrawal instead for pure withdrawal, or cancelCharge for charge cancellation
+         */
+        @Deprecated
+        @Transactional
+        public void recordRefund(User user, Long amount, String orderId, String reason) {
+                log.warn("recordRefund is deprecated. Use recordWithdrawal for pure withdrawal or cancelCharge for charge cancellation.");
+                recordWithdrawal(user, amount, reason);
         }
 }

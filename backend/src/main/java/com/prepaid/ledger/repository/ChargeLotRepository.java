@@ -12,6 +12,11 @@ public interface ChargeLotRepository extends JpaRepository<ChargeLot, Long> {
             BucketType bucketType, Long amountRemaining);
 
     /**
+     * 특정 충전 거래에 해당하는 ChargeLot 조회
+     */
+    java.util.Optional<ChargeLot> findByOriginalEntryId(Long originalEntryId);
+
+    /**
      * 만료 대상 조회 (생성일 기준)
      */
     List<ChargeLot> findAllByCreatedAtBeforeAndAmountRemainingGreaterThan(

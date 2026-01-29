@@ -40,8 +40,15 @@ public class SecurityConfig {
                 .httpBasic(AbstractHttpConfigurer::disable)
 
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/", "/login/**", "/oauth2/**", "/error", "/api/public/**",
-                                "/api/notifications/stream", "/auth/signup", "/auth/login")
+                        .requestMatchers(
+                                "/", "/login/**", "/oauth2/**", "/error", "/api/public/**",
+                                "/api/notifications/stream", "/auth/signup", "/auth/login",
+                                // Swagger UI 및 API docs
+                                "/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**",
+                                "/swagger-resources/**", "/webjars/**",
+                                // Actuator
+                                "/actuator/**"
+                        )
                         .permitAll()
                         .anyRequest().authenticated())
 

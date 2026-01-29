@@ -46,6 +46,25 @@ public class ChargeLot {
     }
 
     /**
+     * 잔액 복구 (사용 취소 시)
+     */
+    public void increaseRemaining(Long amount) {
+        if (amount <= 0) {
+            throw new IllegalArgumentException("복구 금액은 0보다 커야 합니다");
+        }
+        
+        Long newRemaining = this.amountRemaining + amount;
+        if (newRemaining > this.amountTotal) {
+            throw new IllegalStateException(
+                String.format("복구 후 잔액이 원래 금액을 초과할 수 없습니다. total=%d, current=%d, adding=%d", 
+                    amountTotal, amountRemaining, amount)
+            );
+        }
+        
+        this.amountRemaining = newRemaining;
+    }
+
+    /**
      * 포인트 만료 처리
      */
     public void expire() {

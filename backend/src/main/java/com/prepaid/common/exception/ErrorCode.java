@@ -19,6 +19,12 @@ public enum ErrorCode {
     INSUFFICIENT_BALANCE(HttpStatus.BAD_REQUEST, "잔액이 부족합니다."),
     INVALID_REFUND_AMOUNT(HttpStatus.BAD_REQUEST, "환불 금액이 유효하지 않습니다."),
     REFUND_PERIOD_EXPIRED(HttpStatus.BAD_REQUEST, "환불 가능 기간이 지났습니다."),
+    CHARGE_FULLY_USED(HttpStatus.BAD_REQUEST, "이미 모두 사용된 충전 건은 취소할 수 없습니다."),
+    CHARGE_ALREADY_CANCELED(HttpStatus.BAD_REQUEST, "이미 취소된 충전 건입니다."),
+    PAYMENT_ALREADY_REVERSED(HttpStatus.BAD_REQUEST, "이미 취소된 결제 건입니다."),
+
+    // 401 Unauthorized
+    UNAUTHORIZED(HttpStatus.UNAUTHORIZED, "권한이 없습니다."),
 
     // 404 Not Found
     WALLET_NOT_FOUND(HttpStatus.NOT_FOUND, "지갑을 찾을 수 없습니다."),

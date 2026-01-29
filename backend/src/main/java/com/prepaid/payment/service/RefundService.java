@@ -17,11 +17,14 @@ import org.springframework.web.client.RestClient;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 
+import static com.prepaid.common.logging.LoggingUtils.*;
+
 /**
- * 환불 서비스
- * - Toss API 환불 요청
- * - 지갑 잔액 차감
- * - 환불 원장 기록
+ * 환불/인출 서비스
+ * - 순수한 잔액 인출 처리 (은행 계좌로 출금)
+ * - 충전 취소가 필요한 경우 ChargeCancelController 사용
+ * 
+ * Note: Toss API 환불 연동은 향후 구현 예정
  */
 @Slf4j
 @Service
@@ -39,6 +42,12 @@ public class RefundService {
      */
     @Transactional
     public void processRefund(User user, RefundRequest request) {
+        // MDC 컨텍스트 설정
+        setUserContext(user.getId());
+        setTransactionContext("REFUND", request.amount());
+        setOrderContext(request.orderId());
+        
+        try {
         // 1. 금액 검증
         if (request.amount() == null || request.amount() <= 0) {
             throw new InvalidAmountException(ErrorCode.INVALID_REFUND_AMOUNT);
@@ -53,8 +62,10 @@ public class RefundService {
         // 3. 원장에 환불 기록
         ledgerService.recordRefund(user, request.amount(), request.orderId(), request.cancelReason());
         
-        log.info("환불 완료: userId={}, orderId={}, amount={}", 
-                user.getId(), request.orderId(), request.amount());
+        log.info("환불 완료");
+        } finally {
+            clearContext();
+        }
     }
 
     /**

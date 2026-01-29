@@ -43,6 +43,13 @@ front_backup_error/
 *.db
 *.sqlite
 
+# Docker (개인별 설정 및 볼륨 데이터)
+docker-compose.override.yml
+postgres_data/
+redis_data/
+kafka_data/
+elasticsearch_data/
+
 # Sensitive configuration (if needed)
 # application-local.yml
 # application-prod.yml
